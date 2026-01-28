@@ -1,0 +1,26 @@
+# --- Python / Django ---
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env
+*.log
+*.sqlite3
+db.sqlite3
+session_metadata.db
+
+# --- JetBrains / VS Code ---
+.idea/
+.vscode/
+
+# --- Node / Vue ---
+node_modules/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+
+# --- OS ---
+Thumbs.db
