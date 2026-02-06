@@ -1,215 +1,36 @@
+import datetime
 import os
 import re
 import sqlite3
-from typing import Optional, Literal
+from typing import Optional, Literal, Dict, Any, List
 
-from langchain.agents import create_agent
-from langchain.agents.middleware import before_model
+from langchain.agents import create_agent, AgentState
+from langchain.agents.middleware import before_model, dynamic_prompt, ModelRequest
+from langchain_core.runnables import RunnableConfig, RunnableLambda
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.config import get_stream_writer
+from langgraph.runtime import Runtime
 from pydantic import BaseModel, Field
 
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
-from langchain_core.messages import SystemMessage, trim_messages
+from langchain_core.messages import SystemMessage, trim_messages, BaseMessage
 from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.prebuilt import ToolNode, tools_condition, create_react_agent
 from dotenv import load_dotenv
+
+from chat.global_context import get_current_version
+from chat.tools.PuoToolManager import PuoToolManager
+
 load_dotenv()  # 自动寻找并加载项目根目录下的 .env 文件
 # ==========================================
 # 1. 定义实体枚举 (来自你的知识库)
 # ==========================================
 # 为了让 LLM 更精准，限制参数只能是这些值
-ComponentsEnum = Literal[
-    "libck", "ltrustee", "compiler_cpu", "vpp", "license", "dopra_ssp",
-    "hisec_ict", "cmscbb", "bbuapp", "nse_egn", "EMRU", "ipclk",
-    "airan", "iware", "visp", "rtos", "saie", "gmdb", "dopra_ddm",
-    "hitss", "secure_c", "kmc", "rnt", "central_repo", "bts3920r"
-]
-
-ProductsEnum = Literal[
-    "besa", "marp_ru", "rfa", "hert_mpe", "MRAT", "Atom_RRU", "bts",
-    "ant_rcu", "gbts", "nodeb", "makelmt", "SMU", "mbts_cmc"
-]
 
 
-# ==========================================
-# 2. 定义工具 (封装意图与参数校验)
-# ==========================================
-# --- 基础查询类 (意图 1-11) ---
 
-@tool
-def query_hert_node_on_rb(rb_name: str = Field(description="RB名称")):
-    """[意图1] 查询RB上的hert节点信息"""
-    return f"模拟数据：RB {rb_name} 上的 HERT 节点状态正常。"
-
-@tool
-def query_trunk_mirror_info():
-    """[意图2] 查询主干配套的镜像信息"""
-    return "模拟数据：当前主干镜像版本为 Image_20260125_V99。"
-
-@tool
-def query_bugfix_branch_info(branch_name: str = Field(description="Bugfix分支名称，通常包含 'bugfix' 字样")):
-    """[意图3] bugfix分支信息查询"""
-    return f"模拟数据：分支 {branch_name} 包含 3 个待合入补丁。"
-
-@tool
-def query_version_push_status(version_id: str):
-    """[意图4] 版本推送情况查询"""
-    return f"模拟数据：版本 {version_id} 推送成功，目标节点 10.20.30.40。"
-
-@tool
-def query_component_merge_status(
-    component: ComponentsEnum,
-    version_or_branch: str = Field(description="版本号或分支名")
-):
-    """[意图5] 三方组件合入情况查询"""
-    return f"模拟数据：组件 {component} 在 {version_or_branch} 中已合入。"
-
-@tool
-def query_version_basic_info(version_id: str):
-    """[意图6] 版本基本信息查询"""
-    return f"模拟数据：版本 {version_id} 构建于 2026-01-24，负责人：WZH。"
-
-@tool
-def query_version_by_multimode(multimode_id: str):
-    """[意图7] 版本基本信息查询(根据多模版本查询)"""
-    return f"模拟数据：多模版本 {multimode_id} 对应的基线版本是 V500R001。"
-
-@tool
-def query_spc_commercial_status(spc_version: str = Field(description="SPC版本号，如 SPC100")):
-    """[意图8] SPC版本商用情况查询"""
-    return f"模拟数据：{spc_version} 已在 3 个局点商用。"
-
-@tool
-def query_merge_info_between_versions(start_version: str, end_version: str):
-    """[意图9] 获取指定版本之间的合入情况"""
-    return f"模拟数据：{start_version} 到 {end_version} 之间合入了 15 个 MR。"
-
-@tool
-def query_mr_info(mr_id: str = Field(description="MR编号，如 !12345 或 MR链接")):
-    """[意图10] 查询指定MR情况"""
-    return f"模拟数据：MR {mr_id} 状态：已合并，检视人：Admin。"
-
-@tool
-def check_trunk_build_status():
-    """[意图11] 查看主干构建状态"""
-    return "模拟数据：主干构建 🟢 成功 (Build #9527)。"
-
-# 意图 12: 通过节点号查询三方组件配套信息
-@tool
-def query_component_by_node(
-        node_id: str = Field(description="节点编号，通常是32位十六进制字符串或特定字母数字组合"),
-        component_name: ComponentsEnum = Field(description="三方组件名称")
-):
-    """
-    [意图12] 根据具体的构建节点号(Node ID)，查询指定三方组件的版本配套信息。
-    """
-    # 模拟 HTTP 请求
-    print(f"\n📡 [系统调用] 正在查询节点 {node_id} 上的组件 {component_name}...")
-    # 模拟校验逻辑（可根据 Excel 图片中的规则加强）
-    if len(node_id) < 5:
-        return "API错误: 节点号格式不正确，看起来太短了。"
-
-    return {
-        "intent_id": 12,
-        "status": "success",
-        "data": {
-            "node": node_id,
-            "component": component_name,
-            "version": "v1.2.3-release",
-            "merge_time": "2026-01-25 10:00:00"
-        }
-    }
-@tool
-def query_component_by_node(
-    node_id: str = Field(description="节点编号(Node ID)，通常是32位Hash或字母数字组合"),
-    component: ComponentsEnum = Field(description="三方组件名称")
-):
-    """[意图12] 通过节点号查询三方组件配套信息"""
-    # 模拟HTTP请求逻辑
-    print(f"📡 API Call: POST /api/query_match params={{node: {node_id}, type: 'component', name: {component}}}")
-    return {"result": f"节点 {node_id} 配套的 {component} 版本是 v1.0.1"}
-
-@tool
-def query_component_by_branch(
-    branch_name: str = Field(description="分支名称(Branch)，包含'/'符号或前缀如'hertbbu'"),
-    component: ComponentsEnum = Field(description="三方组件名称")
-):
-    """[意图13] 通过分支名称查询三方组件配套信息"""
-    writer = get_stream_writer()
-    writer(f"正在查询天气信息....")
-
-    return {"result": f"分支 {branch_name} 锁定的 {component} 版本是 v2.0"}
-
-@tool
-def query_component_by_hert_version(
-    hert_version: str = Field(description="HERT版本号，必须以 'HERT BBU' 开头"),
-    component: ComponentsEnum = Field(description="三方组件名称")
-):
-    """[意图14] 通过HERT版本号查询三方组件配套信息"""
-    if not hert_version.startswith("HERT BBU"):
-        return "错误：HERT版本号格式不正确，必须以 'HERT BBU' 开头。"
-    return {"result": f"版本 {hert_version} 集成了 {component} v3.5"}
-
-@tool
-def query_product_by_node(
-    node_id: str = Field(description="节点编号"),
-    product: ProductsEnum = Field(description="产品/网元名称")
-):
-    """[意图15] 通过节点号查询产品配套版本"""
-    return {"result": f"节点 {node_id} 对应的 {product} 版本是 V100R001"}
-
-@tool
-def query_product_by_branch(
-    branch_name: str = Field(description="分支名称"),
-    product: ProductsEnum = Field(description="产品/网元名称")
-):
-    """[意图16] 通过分支名称查询产品配套版本信息"""
-    return {"result": f"分支 {branch_name} 对应的 {product} 版本是 V200R002"}
-
-@tool
-def query_product_by_hert_version(
-    hert_version: str = Field(description="HERT版本号，必须以 'HERT BBU' 开头"),
-    product: ProductsEnum = Field(description="产品/网元名称")
-):
-    """[意图17] 通过HERT版本号查询产品配套版本信息"""
-    return {"result": f"版本 {hert_version} 对应的 {product} 配套包是 Package_A"}
-
-
-# 定义一个“状态修改器”函数
-# 这个函数会在每次调用 LLM 之前执行，负责把历史记录剪短
-
-# 将工具放入列表
-# 汇总所有工具
-
-
-@before_model
-def memory_trimming_middleware(state, runtime=None):
-    """
-    视图层中间件：只给模型看最近 10 条消息，节省 Token。
-    """
-    messages = state["messages"]
-
-    # 智能修剪
-    trimmed_messages = trim_messages(
-        messages,
-        strategy="last",
-        token_counter=len,
-        max_tokens=10,
-        start_on="human",
-        include_system=True,
-        allow_partial=False,
-    )
-
-    # 兜底补充 System Prompt
-    if not isinstance(trimmed_messages[0], SystemMessage):
-        trimmed_messages = [SystemMessage(content=SYSTEM_PROMPT)] + trimmed_messages
-
-    # 【重要】返回一个字典，代表对 State 的临时更新
-    # 这样模型看到的 "messages" 就是剪裁过的版本
-    return {"messages": trimmed_messages}
 
 llm = ChatOpenAI(
     model="deepseek-chat",  # 或 gpt-4o
@@ -217,52 +38,193 @@ llm = ChatOpenAI(
     base_url="https://api.deepseek.com",
     temperature=0  # 任务型 Agent 温度设为 0 以保证精准
 )
-tools_list = [
-    query_hert_node_on_rb, query_trunk_mirror_info, query_bugfix_branch_info,
-    query_version_push_status, query_component_merge_status, query_version_basic_info,
-    query_version_by_multimode, query_spc_commercial_status, query_merge_info_between_versions,
-    query_mr_info, check_trunk_build_status,
-    query_component_by_node, query_component_by_branch, query_component_by_hert_version,
-    query_product_by_node, query_product_by_branch, query_product_by_hert_version
-]
+tools_list = PuoToolManager.get_tools_list()
 # ==========================================
 # 3. 配置 LLM 与 System Prompt
 # ==========================================
 
 # 你的原始 Prompt 核心逻辑，转化为 System Prompt
-SYSTEM_PROMPT = """你是一个专业的 IT 运维意图识别专家 Agent。
-你的任务是根据用户的输入，调用对应的工具来查询数据。
+COMPONENTS_LIST = [
+    "tlbck", "ltrusteer", "compiler_cpu", "vpp", "license", "dopra_ssp",
+    "hisec_ict", "cmscbb", "bbuapp", "nse_egn", "ERU", "ipclk",
+    "airan", "iware", "visp", "rtos", "saie", "gndp", "dopra_dda",
+    "hitss", "secure_c", "kme", "rnt", "central_repo", "bts3920"
+]
 
-### 核心规则 (Entity & Logic)
-1. **实体识别**：
-   - 严格区分 **组件(Component)** (如 iware, rtos) 和 **产品(Product)** (如 nodeb, gbts)。
-   - 参数 `component_name` 和 `product_name` 必须从预定义的列表中提取。
+PRODUCTS_LIST = [
+    "besa", "marp_ru", "nfa", "hert_ue", "MRAT", "Atom_RRU", "bts",
+    "ant_rcu", "gbts", "nodeb", "makelut", "SRU", "mbts_cmc"
+]
 
-2. **参数特征识别**：
-   - **分支 (Branch)**: 包含 "/" 或 "hert_bugfix" 等字样。特别注意："hert分支" 属于 Branch，而不是 HERT Version。
-   - **HERT版本**: 必须以 "HERT BBU" 开头。
-   - **节点号 (Node)**: 长字符串，通常是 Hash 值或 ID。
 
-3. **交互原则**：
-   - 如果用户只提供了查询对象（如“查一下iware”），但缺少查询条件（节点？分支？），**不要瞎编参数**。
-   - 请礼貌地反问用户缺少的信息。例如：“您是想在哪个分支、节点，还是特定版本下查询 iware？”
-   - 一旦收集齐参数，立即调用对应的工具。
+# =================================================================
+# 中间件 2: 调试日志打印 (只负责 Print)
+# =================================================================
+@before_model
+def debug_print_prompt(state: AgentState, runtime: Runtime) -> None:
+    """
+    【调试中间件】负责将最终发给 LLM 的消息打印到控制台
+    由于它排在 inject_environment_context 后面，所以它能看到更新后的 Prompt
+    """
+    messages: List[BaseMessage] = state["messages"]
 
-### 映射矩阵参考
-- Node + Component -> 调用 query_component_by_node
-- Branch + Component -> 调用 query_component_by_branch
-- HERT Version + Product -> 调用 query_product_by_hert_version
-"""
+    print("\n" + "🐛" * 20 + " [LLM Request Debug] " + "🐛" * 20)
+    print(f"⏰ 触发时间: {datetime.datetime.now().strftime('%H:%M:%S')}")
+    print(f"📦 消息总数: {len(messages)}")
+    print("-" * 60)
+
+    for i, msg in enumerate(messages):
+        role = msg.type.upper()
+        content = msg.content
+
+        # 为了防止控制台刷屏，System Prompt 如果太长可以截断显示，或者完全显示
+        preview = content
+        if role == "SYSTEM" and len(content) > 100:
+            # 这里只为了演示，实际调试你可能想看全
+            # preview = content[:100] + "...(剩余略)..."
+            pass
+
+        print(f"[{i}] 【{role}】:")
+        print(f"{preview}")
+        print("-" * 30)
+
+    print("🐛" * 45 + "\n")
+
+    # 返回 None 表示不修改任何 state，只做副作用（打印）
+    return None
+
+@before_model
+def inject_environment_context(state: AgentState, runtime: Runtime) -> Dict[str, Any]:
+    """
+    每次调用模型前执行：
+    1. 获取最新时间
+    2. 获取 Config 参数
+    3. 暴力替换/插入 SystemMessage
+    """
+    """
+    动态生成 System Prompt
+    该函数会在每次 LLM 调用前执行，用于注入时间及上下文版本
+    """
+    # --- A. 获取【绝对实时】的时间 ---
+    # 因为这个函数每次对话都会运行，所以 now() 肯定是当前的
+    now = datetime.datetime.now()
+    current_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    # --- B. 获取 Django 传进来的 Context ---
+    # 截图里 `@dynamic_prompt` 用的是 request.runtime.context
+    # 这里直接有 runtime 对象，所以直接用 runtime.context
+    # 加个防御性判断
+
+    user_ver = get_current_version()
+
+    # 打印日志（方便你后台看有没有刷新）
+    print(f"⚡ [@before_model] 触发更新! 时间: {current_time_str}, 版本: {user_ver}")
+
+    # --- C. 组装 Prompt ---
+    components_str = ", ".join(COMPONENTS_LIST)
+    products_str = ", ".join(PRODUCTS_LIST)
+    # 3. 返回格式化后的完整 System Prompt 字符串
+    SYSTEM_PROMPT = """你是一个专业的 IT 运维研发数据查询助手。
+        你的核心任务是精准识别用户意图，并调用工具查询构建、版本、组件及产品配套信息。
+        
+        ### 全局数据字典 (Data Dictionary)
+        注意：涉及 **组件/三方组件** 或 **产品(product)** 时，必须从以下列表中选择，严禁编造：
+        * **支持的组件**: [{components_str}]
+        * **支持的产品**: [{products_str}]
+
+        ### 0. 环境感知 (Environment Context)
+        * **当前系统时间**: {current_time}
+        * **当前上下文版本**: {context_version}
+          > **注意**: 如果用户在问题中没有明确指定版本号 (ver)，**请默认使用上述“当前上下文版本”**。只有当用户明确指定了新版本时，才覆盖此默认值。
+
+
+
+        ### 核心规则（Entity & Logic）
+        ### 1. 参数定义与格式规范 (Strict Format Rules)
+        在提取参数调用工具前，必须严格进行格式校验。如果用户输入不符合规范，请礼貌反问，不要强行调用。
+
+        * **ver (版本号)**:
+            * 格式必须是 **2位数字 + 1个小写字母**。
+            * ✅ 正确示例: `24a`, `24b`, `25c`
+
+
+        * **search_key (通用查询凭证)**:
+            用于组件或产品查询工具的 `search` 字段，模型需自动识别为以下三种类型之一：
+            1.  **构建节点号 (Node ID)**: 长字符串，由字母和数字组成 (通常 40 位)。
+                * 例: `36ff94e91b0ac3bc17513d9aa2a7799a6d771763`
+            2.  **分支名 (Branch)**: 通常包含 `/` 或 `hert_bugfix` 前缀。
+                * 例: `release/24a`, `hert_bugfix_abc`
+                * 注意: 仅仅说 "hert分支" 属于此类，**不是** HERT版本。
+            3.  **HERT版本号**: **必须**以 `HERT BBU` 开头。
+                * 例: `HERT BBU V500R015C00SPC1508002`
+
+        * **特定版本标识**:
+            * **SPC版本**: 必须以 `SPC` 开头 (例: `SPC050`)。
+            * **多模版本**: 必须以 `BTS3900` 开头。
+            * **工程名/CM版本**: 以 `V` 开头 (例: `V500R015...`)。
+        * **注意事项**:
+            hert分支" 属于 分支，而不是 HERT Version。
+
+        ### 2. 工具路由策略 (Routing Logic)
+        请根据用户的意图和提取到的参数，选择最合适的工具：
+
+        **场景 A：查询三方组件 (Component) 或 产品 (Product) 配套**
+        * **判断依据**: 用户提到了具体的组件名 (如 `iware`, `rtos`) 或 产品名 (如 `nodeb`, `besa`)。
+        * **操作**:
+            1.  提取 **ver** (大版本)。
+            2.  提取 **search_key** (节点、分支 或 HERT版本)。
+            3.  如果是组件 -> 调用 `query_component_details`。
+            4.  如果是产品 -> 调用 `query_product_details`。
+        * **注意**: 组件名和产品名必须严格匹配枚举列表，不要臆造。
+
+        **场景 B：查询版本基础信息 (Basic Info)**
+        * **判断依据**: 用户提供了 SPC号、工程名(V开头)、CM版本 或 节点号，并询问“基本信息”或“构建详情”。
+        * **操作**: 调用 `query_version_basic_info`。
+
+
+        ### 3. 交互与记忆原则
+        1.  **上下文补全**:
+            * 如果用户只说了“查一下 iware”，但未提供 `ver` 或 `search_key`，请**先检查上下文历史**。
+            * 如果上下文中有提到过 `ver` (如 "24a")，默认沿用该版本。
+            * 如果上下文无相关信息，请追问：“请问您是在哪个版本（如 24a）、分支还是具体的节点号下查询？”
+        2.  **拒绝瞎编**:
+            * 严禁在没有工具返回结果的情况下编造数据。
+            * 严禁使用枚举列表以外的单词作为 `component_name` 或 `product`。
+
+        """
+
+    filled_prompt = SYSTEM_PROMPT.format(
+        current_time=current_time_str,
+        context_version=user_ver,
+        components_str=components_str,
+        products_str=products_str
+    )
+
+    # --- D. 修改 Messages (核心逻辑) ---
+    # Node-style 中间件要求返回一个 dict，用来更新 state
+    # 我们取出旧的 messages，替换第一条
+    messages = state["messages"]
+    new_sys_msg = SystemMessage(content=filled_prompt)
+
+    if messages and isinstance(messages[0], SystemMessage):
+        # 如果第一条本来就是 SystemMessage，直接替换内容
+        messages[0] = new_sys_msg
+    else:
+        # 否则插入到最前面
+        messages.insert(0, new_sys_msg)
+
+    # 返回更新后的 state
+    return {"messages": messages}
+
 db_path = "agent_chat_history.db" # 这会在你项目根目录生成一个文件
 conn = sqlite3.connect(db_path, check_same_thread=False)
+
 
 # 3. 初始化持久化存储器
 memory = SqliteSaver(conn)
 agent = create_agent(
     model=llm,
     tools=tools_list,
-    system_prompt=SYSTEM_PROMPT,
-
     # 启用记忆持久化 (可选)
     # 把我们的修剪逻辑传给 state_modifier
     # 这样，虽然数据库里存了 100 条，但 LLM 每次只看到最近 10 条 + System Prompt
@@ -271,7 +233,7 @@ agent = create_agent(
 
     # LangChain 1.0 新特性：中间件 (Middleware)
     # 这里我们可以留空，或者添加用于日志、鉴权、限流的中间件
-    # middleware=[memory_trimming_middleware],
+    middleware=[inject_environment_context, debug_print_prompt],
 )
 
 graph = agent

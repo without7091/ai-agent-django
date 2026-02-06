@@ -3,6 +3,7 @@ import threading
 from django.http import JsonResponse, StreamingHttpResponse
 from django.views.decorators.csrf import csrf_exempt
 
+from .global_context import set_current_version
 from .graph import graph
 from .llm import generate_and_update_title
 # 引入你的 graph 和 agent
@@ -124,11 +125,19 @@ def chat_endpoint(request):
                 t.start()
         except ChatSession.DoesNotExist:
             pass
-
+        set_current_version("29a")
         # --- 流式生成器 (同步) ---
         def event_stream():
-            inputs = {"messages": [("user", query)]}
-            config = {"configurable": {"thread_id": session_id}}
+            inputs = {
+                "messages": [("user", query)]
+            }
+            config = {
+                "configurable": {
+                    "thread_id": session_id,
+                    "user_context_version": "29a"
+                },
+                 #
+            }
 
             # 【关键修改】使用 graph.stream (同步方法)
             # 这里的 stream_mode="messages" 配合 v0.2+ 的 LangGraph
