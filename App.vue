@@ -4,7 +4,7 @@
       <div class="sidebar-header">
         <button class="new-chat-btn" @click="createNewSession" :disabled="isLoading">
           <i class="el-icon-plus"></i>
-          <span>新的对话</span>
+          <span>New Chat</span>
         </button>
       </div>
 
@@ -45,12 +45,30 @@
         </div>
       </div>
 
+      <div class="user-profile">
+        <div class="avatar">U</div>
+        <div class="info">
+          <span class="name">User Admin</span>
+          <span class="status">Pro Plan</span>
+        </div>
+      </div>
     </aside>
 
     <main class="main-content">
       <header class="minimal-header">
         <div class="header-inner">
           <span class="model-name">Agent 问答助手 / Assistant</span>
+
+          <div
+              v-if="currentSessionId"
+              class="id-badge"
+              @click="copySessionId"
+              title="点击复制 Session ID (用于运维追踪)"
+          >
+            <i class="el-icon-document-copy"></i>
+            <span class="id-text"></span>
+          </div>
+
           <span class="status-dot" :class="{ processing: isLoading }"></span>
         </div>
       </header>
@@ -176,7 +194,27 @@ export default {
     },
 
     // --- 1. 会话管理逻辑 ---
+    copySessionId() {
+      if (!this.currentSessionId) return;
 
+      navigator.clipboard.writeText(this.currentSessionId)
+          .then(() => {
+            // 如果你安装了 ElementUI，用 this.$message
+            // 如果没有，可以用 alert 或者 console.log
+            if (this.$message) {
+              this.$message.success({
+                message: `ID 已复制: ${this.currentSessionId}`,
+                duration: 2000
+              });
+            } else {
+              alert("ID 已复制");
+            }
+          })
+          .catch(err => {
+            console.error('复制失败', err);
+            this.$message.error("复制失败，请手动复制");
+          });
+    },
     async loadSessionList(isSilent = false) {
       try {
         const res = await fetch(`${API_BASE}/sessions/list?user_id=${USER_ID}`);
@@ -818,5 +856,48 @@ export default {
   font-size: 10px;
   color: #ccc;
   pointer-events: none; /* 防止遮挡点击 */
+}
+
+/* 【新增】顶部 ID 复制按钮样式 */
+.id-badge {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background-color: #f0f2f5;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #909399;
+  cursor: pointer;
+  margin-left: 8px; /* 稍微离标题远一点 */
+  margin-right: 8px;
+  transition: all 0.2s;
+  border: 1px solid transparent;
+}
+
+.id-badge:hover {
+  background-color: #e6f7ff;
+  color: #1890ff;
+  border-color: #bae7ff;
+}
+
+.id-badge i {
+  font-size: 12px;
+}
+
+.id-badge .id-text {
+  font-weight: 600;
+  font-family: monospace; /* 看起来更像技术参数 */
+}
+
+/* 微调原有的 header-inner，让内容对齐更好看 */
+.header-inner {
+  display: flex;
+  align-items: center;
+  /* gap: 8px;  <-- 这行可以去掉或保留，我们上面用了 margin */
+  font-size: 14px;
+  font-weight: 500;
+  color: #666;
+  /* padding: 6px 12px; <--- 建议去掉这个 hover 背景，因为我们现在有了可点击的子元素 */
 }
 </style>
