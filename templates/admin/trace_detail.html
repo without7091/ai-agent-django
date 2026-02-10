@@ -1,10 +1,414 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>$Title$</title>
-</head>
-<body>
-$END$
-</body>
-</html>
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<div id="app">
+    <div class="header-card">
+        <div class="header-left">
+            <a href="/admin/chat/chatsession/" class="back-btn">← 返回列表</a>
+            <div class="title-group">
+                <h1>全链路追踪</h1>
+                <span class="session-id">ID: <span id="display-id"></span></span>
+            </div>
+        </div>
+        <div class="header-right">
+            <div class="stat-item">
+                <span class="label">步骤数</span>
+                <span class="value">[[ traceList.length ]]</span>
+            </div>
+            <div class="stat-item" v-if="totalTokens">
+                <span class="label">Token</span>
+                <span class="value">[[ totalTokens ]]</span>
+            </div>
+        </div>
+    </div>
+
+    <div v-if="loading" class="loading-state">
+        <div class="spinner"></div>
+        <p>正在分析链路数据...</p>
+    </div>
+
+    <div v-if="error" class="error-state">
+        <div class="error-icon">⚠️</div>
+        <p>[[ error ]]</p>
+        <button @click="fetchTrace">重试</button>
+    </div>
+
+    <div v-if="!loading && !error" class="timeline-container">
+        <div v-for="(item, index) in traceList" :key="index" class="timeline-row">
+
+            <div class="timeline-gutter">
+                <div class="line" v-if="index !== traceList.length - 1"></div>
+                <div class="icon-node" :class="item.type">
+                    <span v-if="item.type === 'system'">⚙️</span>
+                    <span v-else-if="item.type === 'human'">👤</span>
+                    <span v-else-if="item.type === 'ai'">🤖</span>
+                    <span v-else-if="item.type === 'tool'">⚡</span>
+                </div>
+            </div>
+
+            <div class="content-card">
+                <div class="card-header">
+                    <span class="role-badge" :class="item.type">[[ item.type.toUpperCase() ]]</span>
+
+                    <div class="meta-group" v-if="item.metadata">
+                        <span v-if="item.metadata.model_name" class="meta-tag">
+                            🧠 [[ item.metadata.model_name ]]
+                        </span>
+                        <span v-if="item.metadata.finish_reason" class="meta-tag">
+                            🏁 [[ item.metadata.finish_reason ]]
+                        </span>
+                    </div>
+                </div>
+
+                <div class="card-body">
+
+                    <div v-if="item.type === 'system'">
+                        <details class="system-details">
+                            <summary>查看系统预设 (System Prompt)</summary>
+                            <div class="code-block">[[ item.content ]]</div>
+                        </details>
+                    </div>
+
+                    <div v-else-if="item.type === 'ai'">
+                        <div class="text-content">[[ item.content || '(AI 正在思考并决定调用工具...)' ]]</div>
+
+                        <div v-if="item.tool_calls && item.tool_calls.length" class="tool-call-section">
+                            <div class="section-label">🛠️ 触发工具调用</div>
+                            <div v-for="tool in item.tool_calls" :key="tool.id" class="tool-request-item">
+                                <div class="tool-name">Function: <span>[[ tool.name ]]</span></div>
+                                <div class="code-block json">[[ formatJson(tool.args) ]]</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div v-else-if="item.type === 'tool'">
+                        <div class="terminal-window">
+                            <div class="terminal-header">
+                                <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
+                                <span class="cmd-title">Output</span>
+                            </div>
+                            <div class="terminal-body">[[ item.content ]]</div>
+                        </div>
+                    </div>
+
+                    <div v-else class="user-message">
+                        [[ item.content ]]
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<input type="hidden" id="django-session-id" value="{{ session_id }}">
+
+{% verbatim %}
+<script>
+    const { createApp, computed } = Vue;
+
+    createApp({
+        delimiters: ['[[', ']]'],
+        data() {
+            return {
+                session_id: '',
+                traceList: [],
+                loading: true,
+                error: null
+            }
+        },
+        computed: {
+            totalTokens() {
+                // 简单的 Token 统计逻辑
+                let sum = 0;
+                this.traceList.forEach(item => {
+                    if (item.metadata && item.metadata.token_usage) {
+                        sum += (item.metadata.token_usage.total_tokens || 0);
+                    }
+                });
+                return sum > 0 ? sum : null;
+            }
+        },
+        mounted() {
+            // 获取 Django 传过来的 ID
+            const el = document.getElementById('django-session-id');
+            if(el) {
+                this.session_id = el.value;
+                document.getElementById('display-id').innerText = this.session_id; // 同步给 HTML 标题
+                this.fetchTrace();
+            } else {
+                this.error = "无法获取 Session ID";
+                this.loading = false;
+            }
+        },
+        methods: {
+            async fetchTrace() {
+                this.loading = true;
+                this.error = null;
+                try {
+                    const res = await fetch(`/api/ops/trace/${this.session_id}`);
+                    const data = await res.json();
+                    if (data.code === 200) {
+                        this.traceList = data.trace;
+                    } else {
+                        throw new Error(data.msg || '数据格式错误');
+                    }
+                } catch (e) {
+                    this.error = "请求失败，请检查后端服务";
+                    console.error(e);
+                } finally {
+                    this.loading = false;
+                }
+            },
+            formatJson(obj) {
+                try {
+                    if (typeof obj === 'string') return obj;
+                    return JSON.stringify(obj, null, 2);
+                } catch (e) {
+                    return obj;
+                }
+            }
+        }
+    }).mount('#app');
+</script>
+{% endverbatim %}
+
+<style>
+    /* 全局变量 */
+    :root {
+        --bg-page: #f8f9fa;
+        --bg-card: #ffffff;
+        --primary: #2563eb;
+        --text-main: #1f2937;
+        --text-sub: #6b7280;
+        --border: #e5e7eb;
+        --code-bg: #1e1e1e;
+        --code-text: #e5e7eb;
+    }
+
+    body {
+        background-color: var(--bg-page);
+        font-family: 'Inter', system-ui, sans-serif;
+        color: var(--text-main);
+    }
+
+    #app {
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 40px 20px;
+    }
+
+    /* 1. Header Card */
+    .header-card {
+        background: var(--bg-card);
+        padding: 24px;
+        border-radius: 16px;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 40px;
+        border: 1px solid var(--border);
+    }
+
+    .back-btn {
+        font-size: 13px;
+        color: var(--text-sub);
+        text-decoration: none;
+        margin-bottom: 8px;
+        display: inline-block;
+    }
+    .back-btn:hover { color: var(--primary); }
+
+    .title-group h1 {
+        font-size: 24px;
+        font-weight: 700;
+        margin: 0;
+        letter-spacing: -0.5px;
+    }
+    .session-id {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12px;
+        color: var(--text-sub);
+        background: #f3f4f6;
+        padding: 4px 8px;
+        border-radius: 6px;
+        margin-top: 6px;
+        display: inline-block;
+    }
+
+    .header-right { display: flex; gap: 24px; }
+    .stat-item { display: flex; flex-direction: column; align-items: flex-end; }
+    .stat-item .label { font-size: 12px; color: var(--text-sub); text-transform: uppercase; font-weight: 600; }
+    .stat-item .value { font-size: 20px; font-weight: 700; color: var(--text-main); font-family: 'JetBrains Mono', monospace; }
+
+    /* 2. Timeline Layout */
+    .timeline-row { display: flex; gap: 24px; position: relative; padding-bottom: 40px; }
+
+    .timeline-gutter {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        width: 40px;
+        flex-shrink: 0;
+    }
+
+    .line {
+        position: absolute;
+        top: 40px;
+        bottom: 0;
+        left: 20px;
+        width: 2px;
+        background-color: #e5e7eb;
+        z-index: 0;
+    }
+
+    .icon-node {
+        width: 40px;
+        height: 40px;
+        border-radius: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 20px;
+        z-index: 1;
+        background: #fff;
+        border: 2px solid #fff;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+    }
+    /* Role Colors */
+    .icon-node.system { background: #f3f4f6; color: #6b7280; }
+    .icon-node.human { background: #eff6ff; color: #2563eb; }
+    .icon-node.ai { background: #ecfdf5; color: #059669; }
+    .icon-node.tool { background: #fff7ed; color: #d97706; }
+
+    /* 3. Content Card */
+    .content-card {
+        flex: 1;
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: hidden;
+        transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .content-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05);
+    }
+
+    .card-header {
+        background: #fafafa;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+
+    .role-badge {
+        font-size: 11px;
+        font-weight: 700;
+        padding: 4px 8px;
+        border-radius: 6px;
+        letter-spacing: 0.5px;
+    }
+    .role-badge.system { background: #e5e7eb; color: #374151; }
+    .role-badge.human { background: #dbeafe; color: #1e40af; }
+    .role-badge.ai { background: #d1fae5; color: #065f46; }
+    .role-badge.tool { background: #ffedd5; color: #92400e; }
+
+    .meta-group { display: flex; gap: 8px; }
+    .meta-tag {
+        font-size: 11px;
+        background: #fff;
+        border: 1px solid var(--border);
+        padding: 2px 8px;
+        border-radius: 100px;
+        color: var(--text-sub);
+    }
+
+    .card-body { padding: 20px; font-size: 15px; line-height: 1.6; }
+
+    /* Specific Content Styles */
+    .system-details summary { cursor: pointer; color: var(--text-sub); font-weight: 500; font-size: 14px; }
+    .system-details[open] summary { margin-bottom: 12px; }
+
+    .code-block {
+        background: #f3f4f6;
+        padding: 12px;
+        border-radius: 8px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 13px;
+        white-space: pre-wrap;
+        color: #374151;
+        overflow-x: auto;
+    }
+    .code-block.json { background: #2d2d2d; color: #a5b4fc; border: 1px solid #444; }
+
+    .tool-call-section {
+        margin-top: 16px;
+        border: 1px solid #bfdbfe;
+        background: #eff6ff;
+        border-radius: 8px;
+        padding: 16px;
+    }
+    .section-label { font-size: 12px; font-weight: 600; color: #1e40af; margin-bottom: 8px; text-transform: uppercase; }
+    .tool-name span { font-weight: 700; color: #2563eb; font-family: monospace; }
+    .tool-request-item { margin-bottom: 12px; }
+
+    /* Terminal Style for Tool Output */
+    .terminal-window {
+        background: var(--code-bg);
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+    }
+    .terminal-header {
+        background: #2d2d2d;
+        padding: 8px 12px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+    .dot { width: 10px; height: 10px; border-radius: 50%; }
+    .dot.red { background: #ff5f56; }
+    .dot.yellow { background: #ffbd2e; }
+    .dot.green { background: #27c93f; }
+    .cmd-title { margin-left: auto; color: #888; font-size: 11px; font-family: monospace; }
+
+    .terminal-body {
+        padding: 16px;
+        color: var(--code-text);
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 13px;
+        white-space: pre-wrap;
+        border-top: 1px solid #333;
+    }
+
+    .user-message { font-weight: 500; color: #111827; }
+
+    /* Loading / Error */
+    .loading-state, .error-state {
+        text-align: center;
+        padding: 60px 0;
+        color: var(--text-sub);
+    }
+    .spinner {
+        width: 40px; height: 40px;
+        border: 3px solid #e5e7eb;
+        border-top-color: var(--primary);
+        border-radius: 50%;
+        margin: 0 auto 16px;
+        animation: spin 1s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .error-icon { font-size: 40px; margin-bottom: 10px; }
+    button {
+        background: var(--primary); color: white; border: none; padding: 8px 16px;
+        border-radius: 6px; cursor: pointer; font-weight: 500;
+    }
+</style>
+{% endblock %}
